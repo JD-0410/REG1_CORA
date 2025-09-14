@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>Te Amo → Corazón (DOM lento en Android)</title>
+<style>
+  :root {
+    --pink: #ff4f7a;
+    --bg1: #0b0820; --bg2: #17103d;
+    --dot: 10px;
+  }
+  html, body { height: 100%; margin: 0; background: var(--bg1); overflow: hidden; }
+
+  /* Cielo estrellado */
+  body::before, body::after {
+    content:""; position: fixed; inset:0; pointer-events:none;
+    background:
+      radial-gradient(2px 2px at 20% 30%, #fff 50%, transparent 55%) repeat,
+      radial-gradient(1px 1px at 40% 70%, #fff 50%, transparent 55%) repeat,
+      radial-gradient(1.5px 1.5px at 70% 20%, #fff 50%, transparent 55%) repeat,
+      linear-gradient(to bottom, var(--bg2), var(--bg1));
+    background-size: 300px 300px, 260px 260px, 320px 320px, 100% 100%;
+    animation: twinkle 6s linear infinite; opacity: .9;
+  }
+  body::after { filter: blur(.3px); opacity: .7; animation-duration: 8s; }
+  @keyframes twinkle { to { background-position: 300px 300px, -260px 260px, 320px -320px, 0 0; } }
+
+  .stage { position: fixed; inset: 0; display: grid; place-items: center; }
+  .layer { position: relative; width: 100vw; height: 100vh; }
+
+  /* Punto brillante (núcleo blanco + halo rosa) */
+  .dot {
+    position: absolute;
+    width: var(--dot); height: var(--dot);
+    transform: translate(-50%,-50%);
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 50%, #fff 0 38%, var(--pink) 39% 100%);
+    box-shadow: 0 0 10px rgba(255,79,122,.65), 0 0 18px rgba(255,79,122,.35);
+    will-change: transform;
+  }
+  @media (min-width: 920px) {
+    :root { --dot: 11px; }
+    .dot { box-shadow: 0 0 12px rgba(255,79,122,.7), 0 0 22px rgba(255,79,122,.38); }
+  }
+
+  /* Overlay inicio */
+  .overlay {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    background: rgba(11,8,32,.9); color: #e5e7eb; z-index: 10; text-align: center;
+    font: 600 16px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 20px;
+  }
+  .card {
+    max-width: min(560px, 92vw);
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.18);
+    border-radius: 16px; padding: 18px 16px;
+  }
+  .card button {
+    padding: 10px 14px; border-radius: 10px; border: 1px solid rgba(255,255,255,.25);
+    background: #1f2937; color: #fff; font-weight: 700; cursor: pointer;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .dot { transition-duration: 1600ms !important; }
+  }
+</style>
+</head>
+<body>
+<div class="stage"><div id="layer" class="layer"></div></div>
+
+<!-- Overlay inicio -->
+<div id="overlay" class="overlay">
+  <div class="card">
+    <div>Toque para iniciar</div>
+    <div style="margin-top:6px;font-size:13px;color:#aeb6c5">Optimizado para que en Android vaya un poco más lento.</div>
+    <div style="margin-top:10px"><button id="startBtn">Iniciar</button></div>
+  </div>
+</div>
+
+<script>
+/* ========= Utilidades ========= */
+const layer = document.getElementById('layer');
+const overlay = document.getElementById('overlay');
+const isAndroid = /Android/i.test(navigator.userAgent);
+const prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function vw(){ return Math.max(1, window.innerWidth  || document.documentElement.clientWidth); }
+function vh(){ return Math.max(1, window.innerHeight || document.documentElement.clientHeight); }
+const TAU = Math.PI*2;
+
+/* ===== Geometría base ===== */
+function insideRect(px,py,x,y,w,h){ return px>=x&&px<=x+w&&py>=y&&py<=y+h; }
+function insideCircle(px,py,cx,cy,r){ const dx=px-cx, dy=py-cy; return dx*dx+dy*dy <= r*r; }
+function insideAnnulus(px,py,cx,cy,rO,rI){ const dx=px-cx,dy=py-cy,d2=dx*dx+dy*dy; return d2<=rO*rO && d2>=rI*rI; }
+function insideTriangle(px,py, ax,ay, bx,by, cx,cy){
+  const v0x=cx-ax,v0y=cy-ay, v1x=bx-ax,v1y=by-ay, v2x=px-ax,v2y=py-ay;
+  const dot00=v0x*v0x+v0y*v0y, dot01=v0x*v1x+v0y*v1y, dot02=v0x*v2x+v0y*v2y;
+  const dot11=v1x*v1x+v1y*v1y, dot12=v1x*v2x+v1y*v2y;
+  const inv=1/((dot00*dot11)-(dot01*dot01));
+  const u=(dot11*dot02 - dot01*dot12)*inv, v=(dot00*dot12 - dot01*dot02)*inv;
+  return (u>=0)&&(v>=0)&&(u+v<=1);
+}
+
+/* ===== Glifos “Te Amo” (vector-only) ===== */
+function glyph_T(s,d){
+  const pts=[],h=s*0.5,t=s*0.16;
+  for(let y=-h;y<=h;y+=d) for(let x=-h;x<=h;x+=d)
+    if(insideRect(x,y,-h,-h,s,t)||insideRect(x,y,-t/2,-h,t,s)) pts.push({x,y});
+  return pts;
+}
+function glyph_A(s,d){
+  const pts=[],h=s*0.5;
+  const A={x:0,y:-h},B={x:-h*0.9,y:h},C={x:h*0.9,y:h};
+  const Ai={x:0,y:-h*0.05},Bi={x:-h*0.54,y:h*0.5},Ci={x:h*0.54,y:h*0.5};
+  const barH=s*0.12;
+  for(let y=-h;y<=h;y+=d) for(let x=-h;x<=h;x+=d){
+    const inBig=insideTriangle(x,y,A.x,A.y,B.x,B.y,C.x,C.y);
+    const inInner=insideTriangle(x,y,Ai.x,Ai.y,Bi.x,Bi.y,Ci.x,Ci.y);
+    const inBar=insideRect(x,y,-h*0.45,-barH/2,h*0.9,barH);
+    if((inBig&&!inInner)||inBar) pts.push({x,y});
+  }
+  return pts;
+}
+function glyph_e(s,d){
+  const pts=[],h=s*0.5,rO=h*0.92,rI=h*0.40,barH=s*0.14;
+  for(let y=-h;y<=h;y+=d) for(let x=-h;x<=h;x+=d){
+    const ring=insideAnnulus(x,y,0,0,rO,rI);
+    const bar =insideRect(x,y,-h*0.65,-barH/2,h*1.3,barH);
+    const cut =insideRect(x,y,h*0.32,-h,h*0.7,2*h);
+    if((ring||bar)&&!cut) pts.push({x,y});
+  }
+  return pts;
+}
+function glyph_m_round(s,d){
+  const pts=[],h=s*0.5,t=s*0.15;
+  const colW=t, colH=s, topY=-h;
+  const leftX=-h, midX=-t*0.05, rightX=h-colW;
+  const archY = -h + t*0.9, archR = s*0.23, archGap = t*0.35;
+  const c1x = (leftX + (midX+colW))/2, c2x = (midX + (rightX+colW))/2, cY = archY;
+  for(let y=-h;y<=h;y+=d) for(let x=-h;x<=h;x+=d){
+    const left  =insideRect(x,y,leftX, topY, colW, colH);
+    const mid   =insideRect(x,y,midX,  topY, colW, colH);
+    const right =insideRect(x,y,rightX,topY, colW, colH);
+    const arc1  =(y<=archY + t*0.7)&&insideCircle(x,y,c1x,cY,archR);
+    const arc2  =(y<=archY + t*0.7)&&insideCircle(x,y,c2x,cY,archR);
+    const cutMid=insideRect(x,y, midX + colW - archGap, topY, archGap*1.2, archR);
+    if(left||mid||right||arc1||arc2){ if(!(cutMid && y<archY)) pts.push({x,y}); }
+  }
+  return pts;
+}
+function glyph_o(s,d){
+  const pts=[],h=s*0.5,rO=h*0.92,rI=h*0.56;
+  for(let y=-h;y<=h;y+=d) for(let x=-h;x<=h;x+=d)
+    if(insideAnnulus(x,y,0,0,rO,rI)) pts.push({x,y});
+  return pts;
+}
+function glyph_space(){ return []; }
+
+function vectorTeAmo(maxW){
+  const W=vw(), H=vh();
+  let s=Math.min(H*0.18, maxW/5.4); s=Math.max(48, Math.floor(s));
+  const baseStep = Math.max(1.8, Math.round(s/22));   // densidad fina
+  const spacing = s*0.18;
+
+  function gWidth(ch){
+    switch(ch){
+      case 'T': return s*0.85; case 'e': return s*0.80; case ' ': return s*0.45;
+      case 'A': return s*0.90; case 'm': return s*1.18; case 'o': return s*0.85;
+      default:  return s*0.85;
+    }
+  }
+  function glyph(ch){
+    switch(ch){
+      case 'T': return glyph_T(s, baseStep);
+      case 'e': return glyph_e(s, baseStep);
+      case 'A': return glyph_A(s, baseStep);
+      case 'm': return glyph_m_round(s, Math.max(1.6, baseStep*0.9));
+      case 'o': return glyph_o(s, baseStep);
+      case ' ': return glyph_space(s, baseStep);
+      default:  return glyph_space(s, baseStep);
+    }
+  }
+
+  const word = ['T','e',' ','A','m','o'];
+  let total=0; for(const ch of word) total += gWidth(ch) + spacing; total -= spacing;
+  const startX = -total/2;
+
+  let out=[], xCursor=0;
+  for(const ch of word){
+    const w=gWidth(ch), pts=glyph(ch), offX=startX + xCursor + w/2;
+    for(const p of pts){ out.push({x:p.x+offX, y:p.y}); }
+    xCursor += w + spacing;
+  }
+
+  const TARGET = 1200; // tope para rendimiento
+  if(out.length > TARGET){
+    const stride = Math.ceil(out.length/TARGET);
+    const thinned = [];
+    for(let i=0;i<out.length;i+=stride) thinned.push(out[i]);
+    out = thinned;
+  }
+  return out;
+}
+
+/* Corazón */
+function heartPoints(count,R){
+  const out=[];
+  for(let i=0;i<count;i++){
+    const t=i/count*TAU;
+    const x=16*Math.pow(Math.sin(t),3);
+    const y=13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t);
+    out.push({x:x*R, y:-y*R});
+  }
+  return out;
+}
+
+/* ========= Velocidad (sin barra) =========
+   Más lento en Android automáticamente */
+let speedFactor = isAndroid ? 1.8 : 1.0;
+if (prefersReduced) speedFactor = Math.max(speedFactor, 2.0);
+
+const BASE_TRANS_MS = 1100; // duración base de cada transición
+const BASE_STAG_MS  = 600;  // escalonado total (suaviza la llegada)
+const PHASE_GAP_MS  = 220;  // pausa entre fases
+
+/* ========= Construcción y animación ========= */
+let dots=[];
+function layoutTargets(){
+  const W=vw(), H=vh();
+  const cx=W/2, cy=H*0.30;
+  const textPts = vectorTeAmo(Math.min(W*0.85, 900)).map(p=>({x:cx+p.x, y:cy+p.y}));
+  const count = Math.max(160, Math.floor(textPts.length*0.95));
+  const R = Math.min(W,H)*0.02;      // corazón pequeño
+  const hy = H*0.55;
+  const heartPts = heartPoints(count,R).map(p=>({x:cx+p.x, y:hy+p.y}));
+  return { textPts, heartPts };
+}
+
+function build(){
+  layer.innerHTML = '';
+  dots = [];
+  const { textPts, heartPts } = layoutTargets();
+
+  const n = Math.max(textPts.length, heartPts.length);
+  const transMs = Math.round(BASE_TRANS_MS * speedFactor);
+  const staggerTotal = Math.round(BASE_STAG_MS * speedFactor);
+
+  for(let i=0;i<n;i++){
+    const el = document.createElement('span');
+    el.className = 'dot';
+    const x0 = (i/n)*vw() + (Math.random()-0.5)*18;
+    const y0 = vh() + Math.random()*60;
+    el.style.left = x0 + 'px';
+    el.style.top  = y0 + 'px';
+    const delay1 = Math.round((i/n) * staggerTotal * 0.9);
+    el.style.transition = `transform ${transMs}ms cubic-bezier(.2,.7,.2,1) ${delay1}ms`;
+    layer.appendChild(el);
+    dots.push(el);
+  }
+
+  // Fase 1 → “Te Amo”
+  requestAnimationFrame(()=>{
+    for(let i=0;i<dots.length;i++){
+      const t = textPts[i % textPts.length];
+      const dx = t.x - parseFloat(dots[i].style.left);
+      const dy = t.y - parseFloat(dots[i].style.top);
+      dots[i].style.transform = `translate(${dx}px, ${dy}px)`;
+    }
+  });
+
+  // Fase 2 → corazón
+  const phaseDelay = Math.round(transMs + staggerTotal + PHASE_GAP_MS);
+  setTimeout(()=>{
+    for(let i=0;i<dots.length;i++){
+      const g = heartPts[i % heartPts.length];
+      const dx = g.x - parseFloat(dots[i].style.left);
+      const dy = g.y - parseFloat(dots[i].style.top);
+      const delay2 = Math.round((i/n) * staggerTotal * 0.9);
+      dots[i].style.transition = `transform ${transMs}ms cubic-bezier(.2,.7,.2,1) ${delay2}ms`;
+      dots[i].style.transform = `translate(${dx}px, ${dy}px)`;
+    }
+  }, phaseDelay);
+}
+
+/* ========= Inicio ========= */
+document.getElementById('startBtn').addEventListener('click', ()=>{
+  overlay.style.display='none';
+  build();
+}, {passive:true});
+
+window.addEventListener('resize', ()=>{
+  if(overlay.style.display !== 'none') return;
+  build();
+}, {passive:true});
+</script>
+</body>
+</html>
